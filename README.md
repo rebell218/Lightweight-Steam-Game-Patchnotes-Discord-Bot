@@ -9,14 +9,6 @@ This bot monitors Steam news for specific AppIDs and posts full patch-note text 
 - Full text posting with smart splitting for Discord’s 2000 character limit
 - Optional source link at the end (embeds suppressed)
 
-## Setup
-1. Create a Discord application + bot in the Discord Developer Portal.
-2. Copy the bot token and the application client ID.
-3. Invite the bot with scopes `bot` and `applications.commands`.
-4. Configure the required bot permissions (see section below).
-5. Optional but recommended: create a Steam Web API key (see section below).
-
-
 ## Commands
 - `/set-target channel:#channel-or-thread`
 - `/add-game appid:123456`
@@ -27,10 +19,23 @@ This bot monitors Steam news for specific AppIDs and posts full patch-note text 
 - `/post-latest appid:123456`
 - `/status`
 
+## Setup
+1. Create a Discord application + bot in the Discord Developer Portal.
+2. Copy the bot token and the application client ID.
+3. Invite the bot with scopes `bot` and `applications.commands`.
+4. Configure the required bot permissions (see section below).
+5. Optional but recommended: create a Steam Web API key (see section below).
+6. Create a `.env` file (see `.env.example`):
+
+## Install + Run
+```bash
+npm install
+npm run start
+```
+
+
 
 ## Discord Bot Permissions
-This bot does not need `Administrator`. Use least privilege.
-
 Required bot permissions:
 - `View Channels`
 - `Send Messages`
@@ -41,8 +46,6 @@ Recommended for thread targets:
 - `Manage Threads` (helps with joining/using existing threads reliably)
 
 
-Important: channel-level overrides can still block the bot even if role-level permissions look correct. If posting fails with `Missing Permissions (50013)`, check the target channel's permission overrides.
-
 ## Steam Web API Key
 `STEAM_API_KEY` is optional in this bot, but recommended for reliability.
 
@@ -50,58 +53,17 @@ What it is used for:
 - Included in Steam news API requests (`GetNewsForApp`) when provided.
 - Helps avoid anonymous request limitations on some setups.
 
-How to create one:
-1. Sign in to Steam with an account that can create API keys.
-2. Open: `https://steamcommunity.com/dev/apikey`
-3. Register an API key and copy it.
-4. Put it into `.env` as `STEAM_API_KEY=...`
-
-If you leave `STEAM_API_KEY` empty:
-- The bot still runs and may work fine.
-- If Steam rate-limits or restricts anonymous access, news fetches can fail intermittently.
-
-## Configure
-Create a `.env` file (see `.env.example`):
-
-```bash
-DISCORD_TOKEN=YOUR_TOKEN
-DISCORD_CLIENT_ID=YOUR_CLIENT_ID
-STEAM_API_KEY=YOUR_STEAM_KEY   # optional
-POLL_INTERVAL_MS=300000
-DEFAULT_FILTER_MODE=patch_only
-INCLUDE_SOURCE_LINKS=1
-LOG_LEVEL=info
-```
-
-## Install + Run
-```bash
-npm install
-npm run start
-```
 
 ## Logging
 The bot writes logs to process output:
 - `stdout`: informational logs (`debug` / `info`)
 - `stderr`: warnings and errors (`warn` / `error`)
 
-There is no dedicated log file by default. Where logs appear depends on how you run the bot:
-- Foreground terminal: logs appear directly in the terminal window.
-- `systemd`: logs are available via `journalctl`.
-- Docker: logs are available via `docker logs`.
-- PM2: logs are available via `pm2 logs`.
-
-
 Set verbosity with `LOG_LEVEL` in `.env`:
 - `debug`: most verbose (all internal flow details)
 - `info`: normal operation logs (recommended default)
 - `warn`: warnings and errors only
 - `error`: errors only
-
-Common commands to inspect logs:
-- Terminal run: start with `npm run start`
-- systemd: `journalctl -u <service-name> -f`
-- Docker: `docker logs -f <container>`
-- PM2: `pm2 logs <app-name> --lines 200`
 
 
 ## Access Control and Abuse Protection
