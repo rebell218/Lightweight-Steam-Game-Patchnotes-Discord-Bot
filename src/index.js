@@ -160,7 +160,7 @@ const commands = [
     )),
   new SlashCommandBuilder()
     .setName("list-games")
-    .setDescription("List all monitored Steam AppIDs"),
+    .setDescription("List all monitored games"),
   adminOnlyCommand(new SlashCommandBuilder()
     .setName("set-filter")
     .setDescription("Set which news items to post")
@@ -483,11 +483,22 @@ client.on("interactionCreate", async (interaction) => {
         return;
       }
       case "list-games": {
+        await interaction.deferReply({ ephemeral: true });
         const games = listGames(guildId);
-        const content = games.length
-          ? `Monitored AppIDs: ${games.join(", ")}`
-          : "No games configured yet.";
-        await interaction.reply({ content, ephemeral: true });
+        if (!games.length) {
+          await interaction.editReply("No games configured yet.");
+          return;
+        }
+
+        const gameLabels = await Promise.all(
+          games.map(async (appId) => {
+            const appName = await resolveAppName(appId);
+            return appName === `AppID ${appId}`
+              ? appName
+              : `${appName} (AppID: ${appId})`;
+          })
+        );
+        await interaction.editReply(`Monitored games: ${gameLabels.join(", ")}`);
         return;
       }
       case "set-filter": {

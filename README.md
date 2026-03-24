@@ -5,6 +5,7 @@ This bot monitors Steam news for specific AppIDs and posts full patch-note text 
 ## Features
 - Per-server configuration for target channel/thread
 - Per-server list of Steam AppIDs to monitor
+- `/list-games` resolves and shows `Game Title (AppID: 123456)`
 - Patch-only or all-news modes
 - Full text posting with smart splitting for Discord’s 2000 character limit
 - Optional source link at the end (embeds suppressed)
