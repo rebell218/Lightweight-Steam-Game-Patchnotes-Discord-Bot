@@ -15,7 +15,7 @@ db.pragma("journal_mode = WAL");
 db.exec(`
   CREATE TABLE IF NOT EXISTS guild_config (
     guild_id TEXT PRIMARY KEY,
-    target_channel_id TEXT NOT NULL,
+    target_channel_id TEXT,
     filter_mode TEXT NOT NULL DEFAULT 'patch_only',
     include_links INTEGER NOT NULL DEFAULT 1
   );
@@ -23,6 +23,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS game_config (
     guild_id TEXT NOT NULL,
     app_id INTEGER NOT NULL,
+    target_channel_id TEXT,
     PRIMARY KEY (guild_id, app_id)
   );
 
@@ -40,6 +41,41 @@ db.exec(`
   );
 `);
 
+function getTableColumns(tableName) {
+  return db.prepare(`PRAGMA table_info(${tableName})`).all();
+}
+
+const guildTargetColumn = getTableColumns("guild_config")
+  .find((column) => column.name === "target_channel_id");
+
+if (guildTargetColumn?.notnull) {
+  const migrateGuildConfig = db.transaction(() => {
+    db.exec(`
+      DROP TABLE IF EXISTS guild_config_next;
+
+      CREATE TABLE guild_config_next (
+        guild_id TEXT PRIMARY KEY,
+        target_channel_id TEXT,
+        filter_mode TEXT NOT NULL DEFAULT 'patch_only',
+        include_links INTEGER NOT NULL DEFAULT 1
+      );
+
+      INSERT INTO guild_config_next (guild_id, target_channel_id, filter_mode, include_links)
+      SELECT guild_id, target_channel_id, filter_mode, include_links
+      FROM guild_config;
+
+      DROP TABLE guild_config;
+      ALTER TABLE guild_config_next RENAME TO guild_config;
+    `);
+  });
+  migrateGuildConfig();
+}
+
+const gameColumns = getTableColumns("game_config").map((column) => column.name);
+if (!gameColumns.includes("target_channel_id")) {
+  db.exec("ALTER TABLE game_config ADD COLUMN target_channel_id TEXT");
+}
+
 const stmtSetTarget = db.prepare(
   `INSERT INTO guild_config (guild_id, target_channel_id, filter_mode, include_links)
    VALUES (@guild_id, @target_channel_id, COALESCE(@filter_mode, 'patch_only'), COALESCE(@include_links, 1))
@@ -51,19 +87,36 @@ const stmtGetGuild = db.prepare(
 );
 
 const stmtListGuilds = db.prepare(
-  `SELECT guild_id, target_channel_id, filter_mode, include_links FROM guild_config`
+  `SELECT guild_ids.guild_id,
+          guild_config.target_channel_id,
+          guild_config.filter_mode,
+          guild_config.include_links
+   FROM (
+     SELECT guild_id FROM guild_config
+     UNION
+     SELECT guild_id FROM game_config
+   ) AS guild_ids
+   LEFT JOIN guild_config ON guild_config.guild_id = guild_ids.guild_id
+   ORDER BY guild_ids.guild_id ASC`
 );
 
 const stmtSetFilter = db.prepare(
-  `UPDATE guild_config SET filter_mode = ? WHERE guild_id = ?`
+  `INSERT INTO guild_config (guild_id, filter_mode)
+   VALUES (?, ?)
+   ON CONFLICT(guild_id) DO UPDATE SET filter_mode = excluded.filter_mode`
 );
 
 const stmtSetIncludeLinks = db.prepare(
-  `UPDATE guild_config SET include_links = ? WHERE guild_id = ?`
+  `INSERT INTO guild_config (guild_id, include_links)
+   VALUES (?, ?)
+   ON CONFLICT(guild_id) DO UPDATE SET include_links = excluded.include_links`
 );
 
 const stmtAddGame = db.prepare(
-  `INSERT OR IGNORE INTO game_config (guild_id, app_id) VALUES (?, ?)`
+  `INSERT INTO game_config (guild_id, app_id, target_channel_id)
+   VALUES (@guild_id, @app_id, @target_channel_id)
+   ON CONFLICT(guild_id, app_id) DO UPDATE SET
+     target_channel_id = COALESCE(excluded.target_channel_id, game_config.target_channel_id)`
 );
 
 const stmtRemoveGame = db.prepare(
@@ -72,6 +125,20 @@ const stmtRemoveGame = db.prepare(
 
 const stmtListGames = db.prepare(
   `SELECT app_id FROM game_config WHERE guild_id = ? ORDER BY app_id ASC`
+);
+
+const stmtListGameConfigs = db.prepare(
+  `SELECT app_id, target_channel_id FROM game_config WHERE guild_id = ? ORDER BY app_id ASC`
+);
+
+const stmtGetGameConfig = db.prepare(
+  `SELECT guild_id, app_id, target_channel_id FROM game_config WHERE guild_id = ? AND app_id = ?`
+);
+
+const stmtSetGameTarget = db.prepare(
+  `INSERT INTO game_config (guild_id, app_id, target_channel_id)
+   VALUES (?, ?, ?)
+   ON CONFLICT(guild_id, app_id) DO UPDATE SET target_channel_id = excluded.target_channel_id`
 );
 
 const stmtGetLastSeen = db.prepare(
@@ -112,15 +179,19 @@ export function listGuildConfigs() {
 }
 
 export function setFilterMode(guildId, filterMode) {
-  stmtSetFilter.run(filterMode, guildId);
+  stmtSetFilter.run(guildId, filterMode);
 }
 
 export function setIncludeLinks(guildId, includeLinks) {
-  stmtSetIncludeLinks.run(includeLinks ? 1 : 0, guildId);
+  stmtSetIncludeLinks.run(guildId, includeLinks ? 1 : 0);
 }
 
-export function addGame(guildId, appId) {
-  stmtAddGame.run(guildId, appId);
+export function addGame(guildId, appId, targetChannelId = null) {
+  stmtAddGame.run({
+    guild_id: guildId,
+    app_id: appId,
+    target_channel_id: targetChannelId,
+  });
 }
 
 export function removeGame(guildId, appId) {
@@ -129,6 +200,18 @@ export function removeGame(guildId, appId) {
 
 export function listGames(guildId) {
   return stmtListGames.all(guildId).map((row) => row.app_id);
+}
+
+export function listGameConfigs(guildId) {
+  return stmtListGameConfigs.all(guildId);
+}
+
+export function getGameConfig(guildId, appId) {
+  return stmtGetGameConfig.get(guildId, appId) ?? null;
+}
+
+export function setGameTarget(guildId, appId, targetChannelId) {
+  stmtSetGameTarget.run(guildId, appId, targetChannelId);
 }
 
 export function getLastSeen(guildId, appId) {

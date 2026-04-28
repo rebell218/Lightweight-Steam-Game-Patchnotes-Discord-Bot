@@ -3,7 +3,8 @@
 This bot monitors Steam news for specific AppIDs and posts full patch-note text into a chosen Discord channel or thread. It avoids link-embeds and splits large posts across multiple messages.
 
 ## Features
-- Per-server configuration for target channel/thread
+- Per-server default target channel/thread
+- Optional per-AppID target channel/thread overrides
 - Per-server list of Steam AppIDs to monitor
 - `/list-games` resolves and shows `Game Title (AppID: 123456)`
 - Patch-only or all-news modes
@@ -12,7 +13,9 @@ This bot monitors Steam news for specific AppIDs and posts full patch-note text 
 
 ## Commands
 - `/set-target channel:#channel-or-thread`
+- `/set-target channel:#channel-or-thread appid:123456`
 - `/add-game appid:123456`
+- `/add-game appid:123456 channel:#channel-or-thread`
 - `/remove-game appid:123456`
 - `/list-games`
 - `/set-filter mode:patch_only|all`
@@ -76,6 +79,7 @@ Set verbosity with `LOG_LEVEL` in `.env`:
 
 ## Notes
 - On first detection of a game, the bot **does not backfill** old patch notes. It starts from the next new update to avoid flooding. If you want backfill, remove the `last_seen` row in the SQLite database or add a custom command.
+- AppID-specific targets override the default server target. Games without their own target use the default target. Games with neither an AppID-specific target nor a default target are skipped until a target is configured.
 - Steam news content can include BBCode/HTML. The bot strips most formatting for clean text.
 - In `patch_only` mode, the bot only uses official Steam community announcement feed posts (external media reposts are ignored).
 

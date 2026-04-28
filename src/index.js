@@ -11,12 +11,14 @@ import {
 } from "discord.js";
 import {
   addGame,
+  getGameConfig,
   getGuildConfig,
   getAppCache,
-  listGames,
+  listGameConfigs,
   listGuildConfigs,
   removeGame,
   setFilterMode,
+  setGameTarget,
   setIncludeLinks,
   setAppCache,
   setLastSeen,
@@ -129,28 +131,41 @@ function adminOnlyCommand(builder) {
   return builder.setDefaultMemberPermissions(PermissionsBitField.Flags.Administrator);
 }
 
+function configureTargetChannelOption(option, required) {
+  return option
+    .setName("channel")
+    .setDescription("Target channel or thread")
+    .setRequired(required)
+    .addChannelTypes(
+      ChannelType.GuildText,
+      ChannelType.GuildAnnouncement,
+      ChannelType.PublicThread,
+      ChannelType.PrivateThread,
+      ChannelType.AnnouncementThread
+    );
+}
+
 const commands = [
   adminOnlyCommand(new SlashCommandBuilder()
     .setName("set-target")
-    .setDescription("Set the channel or thread where patch notes should be posted")
+    .setDescription("Set the default or AppID-specific patch-note target")
     .addChannelOption((option) =>
+      configureTargetChannelOption(option, true)
+    )
+    .addIntegerOption((option) =>
       option
-        .setName("channel")
-        .setDescription("Target channel or thread")
-        .setRequired(true)
-        .addChannelTypes(
-          ChannelType.GuildText,
-          ChannelType.GuildAnnouncement,
-          ChannelType.PublicThread,
-          ChannelType.PrivateThread,
-          ChannelType.AnnouncementThread
-        )
+        .setName("appid")
+        .setDescription("Optional Steam AppID for a game-specific target")
+        .setRequired(false)
     )),
   adminOnlyCommand(new SlashCommandBuilder()
     .setName("add-game")
     .setDescription("Add a Steam AppID to monitor")
     .addIntegerOption((option) =>
       option.setName("appid").setDescription("Steam AppID").setRequired(true)
+    )
+    .addChannelOption((option) =>
+      configureTargetChannelOption(option, false)
     )),
   adminOnlyCommand(new SlashCommandBuilder()
     .setName("remove-game")
@@ -237,6 +252,27 @@ function buildMessages({ title, appLabel, date, content, url, includeLinks }) {
   return messages;
 }
 
+function getFilterMode(config) {
+  return config?.filter_mode || DEFAULT_FILTER_MODE;
+}
+
+function getIncludeLinks(config) {
+  return config?.include_links ?? INCLUDE_SOURCE_LINKS;
+}
+
+function getTargetChannelId(guildConfig, gameConfig) {
+  return gameConfig?.target_channel_id ?? guildConfig?.target_channel_id ?? null;
+}
+
+function formatTarget(channelId) {
+  return channelId ? `<#${channelId}>` : "(none)";
+}
+
+function fitDiscordMessage(content) {
+  if (content.length <= 2000) return content;
+  return `${content.slice(0, 1996)}...`;
+}
+
 async function resolveAppName(appId) {
   const cache = getAppCache(appId);
   const now = Math.floor(Date.now() / 1000);
@@ -258,10 +294,9 @@ async function resolveAppName(appId) {
   return `AppID ${appId}`;
 }
 
-async function ensureTargetChannel(guildId) {
-  const config = getGuildConfig(guildId);
-  if (!config) return null;
-  const channel = await client.channels.fetch(config.target_channel_id).catch(() => null);
+async function ensureTargetChannel(channelId) {
+  if (!channelId) return null;
+  const channel = await client.channels.fetch(channelId).catch(() => null);
   if (!channel || !channel.isTextBased()) return null;
   if (channel.isThread()) {
     try {
@@ -270,7 +305,7 @@ async function ensureTargetChannel(guildId) {
       // Ignore if we cannot join threads (permissions)
     }
   }
-  return { channel, config };
+  return channel;
 }
 
 async function pollOnce() {
@@ -293,23 +328,38 @@ async function pollOnce() {
         continue;
       }
 
-      const target = await ensureTargetChannel(guildId);
-      if (!target) {
-        logWarn("Skipping guild with inaccessible target channel", {
-          guildId,
-          targetChannelId: guild.target_channel_id,
-        });
-        continue;
-      }
-
-      const { channel, config } = target;
-      const games = listGames(guildId);
+      const games = listGameConfigs(guildId);
       if (!games.length) {
         logDebug("No monitored games configured for guild", { guildId });
         continue;
       }
 
-      for (const appId of games) {
+      const targetChannels = new Map();
+      async function resolvePollTarget(channelId) {
+        if (!targetChannels.has(channelId)) {
+          targetChannels.set(channelId, await ensureTargetChannel(channelId));
+        }
+        return targetChannels.get(channelId);
+      }
+
+      for (const game of games) {
+        const appId = game.app_id;
+        const targetChannelId = getTargetChannelId(guild, game);
+        if (!targetChannelId) {
+          logWarn("Skipping app with no target channel configured", { guildId, appId });
+          continue;
+        }
+
+        const channel = await resolvePollTarget(targetChannelId);
+        if (!channel) {
+          logWarn("Skipping app with inaccessible target channel", {
+            guildId,
+            appId,
+            targetChannelId,
+          });
+          continue;
+        }
+
         stats.appsVisited += 1;
         let items;
         try {
@@ -319,7 +369,7 @@ async function pollOnce() {
           continue;
         }
 
-        const filtered = filterNewsItems(items, config.filter_mode || DEFAULT_FILTER_MODE);
+        const filtered = filterNewsItems(items, getFilterMode(guild));
         if (!filtered.length) continue;
 
         filtered.sort((a, b) => b.date - a.date);
@@ -351,7 +401,7 @@ async function pollOnce() {
             date: item.date,
             content: content || "(No details provided)",
             url: item.url,
-            includeLinks: config.include_links ?? INCLUDE_SOURCE_LINKS,
+            includeLinks: getIncludeLinks(guild),
           });
 
           try {
@@ -439,6 +489,7 @@ client.on("interactionCreate", async (interaction) => {
     switch (interaction.commandName) {
       case "set-target": {
         const channel = interaction.options.getChannel("channel", true);
+        const appId = interaction.options.getInteger("appid", false);
         if (!channel.isTextBased()) {
           await interaction.reply({
             content: "Please choose a text channel or thread.",
@@ -446,6 +497,23 @@ client.on("interactionCreate", async (interaction) => {
           });
           return;
         }
+
+        if (appId !== null) {
+          if (!Number.isInteger(appId) || appId <= 0) {
+            await interaction.reply({
+              content: "Please provide a valid Steam AppID.",
+              ephemeral: true,
+            });
+            return;
+          }
+          setGameTarget(guildId, appId, channel.id);
+          await interaction.reply({
+            content: `Target for AppID ${appId} set to <#${channel.id}>.`,
+            ephemeral: true,
+          });
+          return;
+        }
+
         setTarget(guildId, channel.id, {
           filterMode: DEFAULT_FILTER_MODE,
           includeLinks: INCLUDE_SOURCE_LINKS ? 1 : 0,
@@ -458,6 +526,7 @@ client.on("interactionCreate", async (interaction) => {
       }
       case "add-game": {
         const appId = interaction.options.getInteger("appid", true);
+        const channel = interaction.options.getChannel("channel", false);
         if (!Number.isInteger(appId) || appId <= 0) {
           await interaction.reply({
             content: "Please provide a valid Steam AppID.",
@@ -465,10 +534,20 @@ client.on("interactionCreate", async (interaction) => {
           });
           return;
         }
-        addGame(guildId, appId);
+
+        if (channel && !channel.isTextBased()) {
+          await interaction.reply({
+            content: "Please choose a text channel or thread.",
+            ephemeral: true,
+          });
+          return;
+        }
+
+        addGame(guildId, appId, channel?.id ?? null);
         await interaction.reply({
-          content: `Added AppID ${appId}. New posts will start from the next update.`
-            .trim(),
+          content: channel
+            ? `Added AppID ${appId} with target <#${channel.id}>. New posts will start from the next update.`
+            : `Added AppID ${appId}. New posts will start from the next update.`,
           ephemeral: true,
         });
         return;
@@ -484,33 +563,31 @@ client.on("interactionCreate", async (interaction) => {
       }
       case "list-games": {
         await interaction.deferReply({ ephemeral: true });
-        const games = listGames(guildId);
+        const config = getGuildConfig(guildId);
+        const games = listGameConfigs(guildId);
         if (!games.length) {
           await interaction.editReply("No games configured yet.");
           return;
         }
 
         const gameLabels = await Promise.all(
-          games.map(async (appId) => {
+          games.map(async (game) => {
+            const appId = game.app_id;
             const appName = await resolveAppName(appId);
-            return appName === `AppID ${appId}`
+            const label = appName === `AppID ${appId}`
               ? appName
               : `${appName} (AppID: ${appId})`;
+            const targetChannelId = getTargetChannelId(config, game);
+            const target = targetChannelId ? formatTarget(targetChannelId) : "no target";
+            const source = game.target_channel_id ? "custom" : "default";
+            return `${label} -> ${target}${targetChannelId ? ` (${source})` : ""}`;
           })
         );
-        await interaction.editReply(`Monitored games: ${gameLabels.join(", ")}`);
+        await interaction.editReply(fitDiscordMessage(`Monitored games:\n- ${gameLabels.join("\n- ")}`));
         return;
       }
       case "set-filter": {
         const mode = interaction.options.getString("mode", true);
-        const config = getGuildConfig(guildId);
-        if (!config) {
-          await interaction.reply({
-            content: "Please run /set-target first.",
-            ephemeral: true,
-          });
-          return;
-        }
         setFilterMode(guildId, mode);
         await interaction.reply({
           content: `Filter mode set to ${mode}.`,
@@ -521,14 +598,6 @@ client.on("interactionCreate", async (interaction) => {
       case "set-links": {
         const enabled = interaction.options.getString("enabled", true);
         const include = enabled === "on";
-        const config = getGuildConfig(guildId);
-        if (!config) {
-          await interaction.reply({
-            content: "Please run /set-target first.",
-            ephemeral: true,
-          });
-          return;
-        }
         setIncludeLinks(guildId, include ? 1 : 0);
         await interaction.reply({
           content: `Source links ${include ? "enabled" : "disabled"}.`,
@@ -546,13 +615,8 @@ client.on("interactionCreate", async (interaction) => {
           return;
         }
         const config = getGuildConfig(guildId);
-        if (!config) {
-          await interaction.reply({
-            content: "Please run /set-target first.",
-            ephemeral: true,
-          });
-          return;
-        }
+        const gameConfig = getGameConfig(guildId, appId);
+        const targetChannelId = getTargetChannelId(config, gameConfig);
 
         if (postLatestGuildInFlight.has(guildId)) {
           await interaction.reply({
@@ -567,8 +631,15 @@ client.on("interactionCreate", async (interaction) => {
         try {
           await interaction.deferReply({ ephemeral: true });
 
-          const target = await ensureTargetChannel(guildId);
-          if (!target) {
+          if (!targetChannelId) {
+            await interaction.editReply(
+              `No target is configured for AppID ${appId}. Use /set-target with appid:${appId} or configure a default target.`
+            );
+            return;
+          }
+
+          const targetChannel = await ensureTargetChannel(targetChannelId);
+          if (!targetChannel) {
             await interaction.editReply(
               "I cannot access the configured target channel or thread."
             );
@@ -587,7 +658,7 @@ client.on("interactionCreate", async (interaction) => {
 
           const filtered = filterNewsItems(
             items,
-            config.filter_mode || DEFAULT_FILTER_MODE
+            getFilterMode(config)
           );
           if (!filtered.length) {
             await interaction.editReply("No patch notes found for that AppID.");
@@ -604,12 +675,12 @@ client.on("interactionCreate", async (interaction) => {
             date: item.date,
             content: content || "(No details provided)",
             url: item.url,
-            includeLinks: config.include_links ?? INCLUDE_SOURCE_LINKS,
+            includeLinks: getIncludeLinks(config),
           });
 
           try {
             for (const message of messages) {
-              await target.channel.send({
+              await targetChannel.send({
                 content: message,
                 allowedMentions: { parse: [] },
                 suppressEmbeds: true,
@@ -622,7 +693,7 @@ client.on("interactionCreate", async (interaction) => {
               {
                 guildId,
                 appId,
-                channelId: target.channel.id,
+                channelId: targetChannel.id,
                 itemGid: item.gid,
                 itemDate: item.date,
               },
@@ -643,20 +714,29 @@ client.on("interactionCreate", async (interaction) => {
       }
       case "status": {
         const config = getGuildConfig(guildId);
-        const games = listGames(guildId);
-        if (!config) {
+        const games = listGameConfigs(guildId);
+        if (!config && !games.length) {
           await interaction.reply({
-            content: "No target configured yet. Use /set-target first.",
+            content: "No configuration yet. Use /set-target or /add-game first.",
             ephemeral: true,
           });
           return;
         }
-        const target = `<#${config.target_channel_id}>`;
-        const filter = config.filter_mode || DEFAULT_FILTER_MODE;
-        const links = config.include_links ? "on" : "off";
-        const gamesText = games.length ? games.join(", ") : "(none)";
+        const target = formatTarget(config?.target_channel_id);
+        const filter = getFilterMode(config);
+        const links = getIncludeLinks(config) ? "on" : "off";
+        const gamesText = games.length
+          ? games
+              .map((game) => {
+                const targetChannelId = getTargetChannelId(config, game);
+                const targetText = targetChannelId ? formatTarget(targetChannelId) : "no target";
+                const source = game.target_channel_id ? "custom" : "default";
+                return `${game.app_id}: ${targetText}${targetChannelId ? ` (${source})` : ""}`;
+              })
+              .join("\n")
+          : "(none)";
         await interaction.reply({
-          content: `Target: ${target}\nFilter: ${filter}\nLinks: ${links}\nGames: ${gamesText}`,
+          content: fitDiscordMessage(`Default target: ${target}\nFilter: ${filter}\nLinks: ${links}\nGames:\n${gamesText}`),
           ephemeral: true,
         });
         return;
