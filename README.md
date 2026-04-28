@@ -11,9 +11,9 @@ This bot monitors Steam news for specific AppIDs and posts full patch-note text 
 
 ## Commands
 - `/set-target channel:#channel-or-thread`
-- `/set-target channel:#channel-or-thread appid:123456`
-- `/add-game appid:123456`
-- `/add-game appid:123456 channel:#channel-or-thread`
+- `/set-target channel:#channel-or-thread appid:123456` (monitored games only)
+- `/add-game appid:123456` (uses the default target)
+- `/add-game appid:123456 channel:#channel-or-thread` (uses a custom target)
 - `/remove-game appid:123456`
 - `/list-games`
 - `/set-filter mode:patch_only|all`
@@ -77,7 +77,10 @@ Set verbosity with `LOG_LEVEL` in `.env`:
 
 ## Notes
 - On first detection of a game, the bot **does not backfill** old patch notes. It starts from the next new update to avoid flooding. If you want backfill, remove the `last_seen` row in the SQLite database or add a custom command.
-- AppID-specific targets override the default server target. Games without their own target use the default target. Games with neither an AppID-specific target nor a default target are skipped until a target is configured.
+- `/add-game` requires either an existing default target or a custom channel parameter.
+- `/set-target appid:...` only changes the target for an already monitored game. Use `/add-game` to start monitoring a new AppID.
+- When a game is added with an effective target, or an existing game receives its first effective target, the bot marks current patch notes as already seen during configuration.
+- AppID-specific targets override the default server target. Games without their own target use the default target.
 - Steam news content can include BBCode/HTML. The bot strips most formatting for clean text.
 - In `patch_only` mode, the bot only uses official Steam community announcement feed posts (external media reposts are ignored).
 

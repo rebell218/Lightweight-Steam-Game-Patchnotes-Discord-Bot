@@ -273,6 +273,47 @@ function fitDiscordMessage(content) {
   return `${content.slice(0, 1996)}...`;
 }
 
+async function markExistingNewsAsSeen(guildId, appId, filterMode, reason) {
+  const fallbackDate = Math.floor(Date.now() / 1000);
+  setLastSeen(guildId, appId, fallbackDate);
+
+  try {
+    const items = await fetchNewsForApp(appId, STEAM_API_KEY);
+    const filtered = filterNewsItems(items, filterMode);
+    if (!filtered.length) {
+      logInfo("Initialized last_seen to current time with no existing news found", {
+        guildId,
+        appId,
+        reason,
+        lastSeenDate: fallbackDate,
+      });
+      return { initialized: true, lastSeenDate: fallbackDate, noNews: true };
+    }
+
+    filtered.sort((a, b) => b.date - a.date);
+    setLastSeen(guildId, appId, filtered[0].date);
+    logInfo("Initialized last_seen during configuration", {
+      guildId,
+      appId,
+      reason,
+      lastSeenDate: filtered[0].date,
+    });
+    return { initialized: true, lastSeenDate: filtered[0].date };
+  } catch (err) {
+    logWarn(
+      "Steam fetch failed while initializing last_seen; using current time",
+      {
+        guildId,
+        appId,
+        reason,
+        lastSeenDate: fallbackDate,
+      },
+      err
+    );
+    return { initialized: true, lastSeenDate: fallbackDate, fallback: true };
+  }
+}
+
 async function resolveAppName(appId) {
   const cache = getAppCache(appId);
   const now = Math.floor(Date.now() / 1000);
@@ -498,30 +539,71 @@ client.on("interactionCreate", async (interaction) => {
           return;
         }
 
+        await interaction.deferReply({ ephemeral: true });
+
         if (appId !== null) {
           if (!Number.isInteger(appId) || appId <= 0) {
-            await interaction.reply({
-              content: "Please provide a valid Steam AppID.",
-              ephemeral: true,
-            });
+            await interaction.editReply("Please provide a valid Steam AppID.");
             return;
           }
+          const config = getGuildConfig(guildId);
+          const existingGame = getGameConfig(guildId, appId);
+          if (!existingGame) {
+            await interaction.editReply(
+              `AppID ${appId} is not monitored yet. Use /add-game first.`
+            );
+            return;
+          }
+
+          const wasTargetable = Boolean(
+            getTargetChannelId(config, existingGame)
+          );
+
+          if (!wasTargetable) {
+            await markExistingNewsAsSeen(
+              guildId,
+              appId,
+              getFilterMode(config),
+              "game-target-configured"
+            );
+          }
+
           setGameTarget(guildId, appId, channel.id);
-          await interaction.reply({
-            content: `Target for AppID ${appId} set to <#${channel.id}>.`,
-            ephemeral: true,
-          });
+
+          const suffix = !wasTargetable
+            ? " Existing patch notes were marked as seen; new posts will start from the next update."
+            : "";
+          await interaction.editReply(
+            `Target for AppID ${appId} set to <#${channel.id}>.${suffix}`
+          );
           return;
+        }
+
+        const config = getGuildConfig(guildId);
+        const games = listGameConfigs(guildId);
+        const newlyTargetableGames = games.filter((game) => {
+          if (game.target_channel_id) return false;
+          return !getTargetChannelId(config, game);
+        });
+
+        for (const game of newlyTargetableGames) {
+          await markExistingNewsAsSeen(
+            guildId,
+            game.app_id,
+            getFilterMode(config),
+            "default-target-configured"
+          );
         }
 
         setTarget(guildId, channel.id, {
           filterMode: DEFAULT_FILTER_MODE,
           includeLinks: INCLUDE_SOURCE_LINKS ? 1 : 0,
         });
-        await interaction.reply({
-          content: `Target set to <#${channel.id}>.`,
-          ephemeral: true,
-        });
+
+        const suffix = newlyTargetableGames.length
+          ? ` Existing patch notes were marked as seen for ${newlyTargetableGames.length} game(s) that did not previously have a target.`
+          : "";
+        await interaction.editReply(`Target set to <#${channel.id}>.${suffix}`);
         return;
       }
       case "add-game": {
@@ -543,13 +625,40 @@ client.on("interactionCreate", async (interaction) => {
           return;
         }
 
+        await interaction.deferReply({ ephemeral: true });
+
+        const config = getGuildConfig(guildId);
+        const existingGame = getGameConfig(guildId, appId);
+        if (existingGame) {
+          await interaction.editReply(
+            `AppID ${appId} is already monitored. Use /set-target with appid:${appId} to change its target.`
+          );
+          return;
+        }
+
+        const targetChannelId =
+          channel?.id ?? config?.target_channel_id ?? null;
+        if (!targetChannelId) {
+          await interaction.editReply(
+            "No default target is configured. Use /set-target channel:#target first, or provide the optional channel parameter."
+          );
+          return;
+        }
+
+        await markExistingNewsAsSeen(
+          guildId,
+          appId,
+          getFilterMode(config),
+          "game-added"
+        );
+
         addGame(guildId, appId, channel?.id ?? null);
-        await interaction.reply({
-          content: channel
-            ? `Added AppID ${appId} with target <#${channel.id}>. New posts will start from the next update.`
-            : `Added AppID ${appId}. New posts will start from the next update.`,
-          ephemeral: true,
-        });
+
+        const targetText = channel
+          ? ` with target <#${channel.id}>`
+          : ` using default target <#${targetChannelId}>`;
+        const suffix = " Existing patch notes were marked as seen; new posts will start from the next update.";
+        await interaction.editReply(`Added AppID ${appId}${targetText}.${suffix}`);
         return;
       }
       case "remove-game": {
@@ -632,8 +741,11 @@ client.on("interactionCreate", async (interaction) => {
           await interaction.deferReply({ ephemeral: true });
 
           if (!targetChannelId) {
+            const targetHelp = gameConfig
+              ? `Use /set-target with appid:${appId} or configure a default target.`
+              : "Use /add-game with a channel parameter or configure a default target first.";
             await interaction.editReply(
-              `No target is configured for AppID ${appId}. Use /set-target with appid:${appId} or configure a default target.`
+              `No target is configured for AppID ${appId}. ${targetHelp}`
             );
             return;
           }

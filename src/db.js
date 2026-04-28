@@ -113,10 +113,8 @@ const stmtSetIncludeLinks = db.prepare(
 );
 
 const stmtAddGame = db.prepare(
-  `INSERT INTO game_config (guild_id, app_id, target_channel_id)
-   VALUES (@guild_id, @app_id, @target_channel_id)
-   ON CONFLICT(guild_id, app_id) DO UPDATE SET
-     target_channel_id = COALESCE(excluded.target_channel_id, game_config.target_channel_id)`
+  `INSERT OR IGNORE INTO game_config (guild_id, app_id, target_channel_id)
+   VALUES (@guild_id, @app_id, @target_channel_id)`
 );
 
 const stmtRemoveGame = db.prepare(
@@ -136,9 +134,7 @@ const stmtGetGameConfig = db.prepare(
 );
 
 const stmtSetGameTarget = db.prepare(
-  `INSERT INTO game_config (guild_id, app_id, target_channel_id)
-   VALUES (?, ?, ?)
-   ON CONFLICT(guild_id, app_id) DO UPDATE SET target_channel_id = excluded.target_channel_id`
+  `UPDATE game_config SET target_channel_id = ? WHERE guild_id = ? AND app_id = ?`
 );
 
 const stmtGetLastSeen = db.prepare(
@@ -211,7 +207,7 @@ export function getGameConfig(guildId, appId) {
 }
 
 export function setGameTarget(guildId, appId, targetChannelId) {
-  stmtSetGameTarget.run(guildId, appId, targetChannelId);
+  stmtSetGameTarget.run(targetChannelId, guildId, appId);
 }
 
 export function getLastSeen(guildId, appId) {
