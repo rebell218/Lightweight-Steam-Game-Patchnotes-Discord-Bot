@@ -3,12 +3,10 @@
 This bot monitors Steam news for specific AppIDs and posts full patch-note text into a chosen Discord channel or thread. It avoids link-embeds and splits large posts across multiple messages.
 
 ## Features
-- Per-server default target channel/thread
-- Optional per-AppID target channel/thread overrides
-- Per-server list of Steam AppIDs to monitor
-- `/list-games` resolves and shows `Game Title (AppID: 123456)`
-- Patch-only or all-news modes
 - Full text posting with smart splitting for Discord’s 2000 character limit
+- Patch-only or all-news modes
+- Supports Channels and Threads
+- Set a global channel for all Games or designate target-channels per Game individually
 - Optional source link at the end (embeds suppressed)
 
 ## Commands
