@@ -91,9 +91,9 @@ In `rss` mode, RSS errors are reported without a Web API fallback. When `/set-so
 - `/set-target appid:...` only changes the target for an already monitored game. Use `/add-game` to start monitoring a new AppID.
 - When a game is added with an effective target, or an existing game receives its first effective target, the bot marks current patch notes as already seen during configuration.
 - AppID-specific targets override the default server target. Games without their own target use the default target.
-- Steam news content can include BBCode/HTML. The bot strips most formatting for clean text.
+- Steam news content can include BBCode/HTML. The bot converts supported structure into Discord-friendly Markdown, including headings, emphasis, links, lists, and tables represented as lists.
 - In `patch_only` mode, the bot only uses official Steam community announcement feed posts (external media reposts are ignored).
-- RSS mode normalizes Steam RSS HTML into the same plain Discord-friendly format used for Web API posts.
+- RSS mode converts Steam RSS HTML into the same Discord-friendly Markdown format used for Web API posts.
 
 ## Data Storage
 - SQLite database: `data/bot.sqlite`
