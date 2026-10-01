@@ -291,7 +291,7 @@ function getIncludeLinks(config) {
 }
 
 function getSourceMode(config) {
-  const value = Number(config?.debug_mode);
+  const value = Number(config?.debug_mode ?? 1);
   if (value === 0) return "api";
   if (value === 2) return "rss";
   return "auto";

@@ -83,13 +83,19 @@ if (!guildColumns.includes("debug_mode")) {
 }
 
 // Source-mode values: 0 = API, 1 = auto (RSS with API fallback), 2 = RSS.
-// Migrate the former default (debug_mode = 0) to the new default. The
-// legacy /set-debug off command remains available for an explicit API choice.
-db.exec("UPDATE guild_config SET debug_mode = 1 WHERE debug_mode = 0");
+// Apply the default change once, preserving explicit API selections on restart.
+db.exec("CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY)");
+db.transaction(() => {
+  const name = "rss-first-source-default-v1";
+  if (!db.prepare("SELECT 1 FROM schema_migrations WHERE name = ?").get(name)) {
+    db.exec("UPDATE guild_config SET debug_mode = 1 WHERE debug_mode = 0");
+    db.prepare("INSERT INTO schema_migrations (name) VALUES (?)").run(name);
+  }
+})();
 
 const stmtSetTarget = db.prepare(
-  `INSERT INTO guild_config (guild_id, target_channel_id, filter_mode, include_links)
-   VALUES (@guild_id, @target_channel_id, COALESCE(@filter_mode, 'patch_only'), COALESCE(@include_links, 1))
+  `INSERT INTO guild_config (guild_id, target_channel_id, filter_mode, include_links, debug_mode)
+   VALUES (@guild_id, @target_channel_id, COALESCE(@filter_mode, 'patch_only'), COALESCE(@include_links, 1), 1)
    ON CONFLICT(guild_id) DO UPDATE SET target_channel_id = excluded.target_channel_id`
 );
 
@@ -113,14 +119,14 @@ const stmtListGuilds = db.prepare(
 );
 
 const stmtSetFilter = db.prepare(
-  `INSERT INTO guild_config (guild_id, filter_mode)
-   VALUES (?, ?)
+  `INSERT INTO guild_config (guild_id, filter_mode, debug_mode)
+   VALUES (?, ?, 1)
    ON CONFLICT(guild_id) DO UPDATE SET filter_mode = excluded.filter_mode`
 );
 
 const stmtSetIncludeLinks = db.prepare(
-  `INSERT INTO guild_config (guild_id, include_links)
-   VALUES (?, ?)
+  `INSERT INTO guild_config (guild_id, include_links, debug_mode)
+   VALUES (?, ?, 1)
    ON CONFLICT(guild_id) DO UPDATE SET include_links = excluded.include_links`
 );
 
@@ -201,7 +207,11 @@ export function setIncludeLinks(guildId, includeLinks) {
 }
 
 export function setDebugMode(guildId, debugMode) {
-  stmtSetDebugMode.run(guildId, debugMode ? 1 : 0);
+  const sourceValue = Number(debugMode);
+  if (![0, 1, 2].includes(sourceValue)) {
+    throw new RangeError("Source mode must be 0 (API), 1 (auto), or 2 (RSS)");
+  }
+  stmtSetDebugMode.run(guildId, sourceValue);
 }
 
 export function addGame(guildId, appId, targetChannelId = null) {
