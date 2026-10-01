@@ -17,6 +17,7 @@ import {
   listGameConfigs,
   listGuildConfigs,
   removeGame,
+  setDebugMode,
   setFilterMode,
   setGameTarget,
   setIncludeLinks,
@@ -28,7 +29,9 @@ import {
 import {
   fetchAppName,
   fetchNewsForApp,
+  fetchRssNewsForApp,
   filterNewsItems,
+  stripRssHtml,
   stripSteamMarkup,
 } from "./steam.js";
 import { splitForDiscord } from "./split.js";
@@ -203,6 +206,33 @@ const commands = [
         )
     )),
   adminOnlyCommand(new SlashCommandBuilder()
+    .setName("set-source")
+    .setDescription("Choose the Steam news source")
+    .addStringOption((option) =>
+      option
+        .setName("source")
+        .setDescription("RSS, automatic fallback, or Steam Web API")
+        .setRequired(true)
+        .addChoices(
+          { name: "RSS", value: "rss" },
+          { name: "Auto (RSS, then Web API)", value: "auto" },
+          { name: "Steam Web API", value: "api" }
+        )
+    )),
+  adminOnlyCommand(new SlashCommandBuilder()
+    .setName("set-debug")
+    .setDescription("Legacy alias: enable or disable RSS source")
+    .addStringOption((option) =>
+      option
+        .setName("enabled")
+        .setDescription("Whether this server should use RSS")
+        .setRequired(true)
+        .addChoices(
+          { name: "On (RSS)", value: "on" },
+          { name: "Off (Web API)", value: "off" }
+        )
+    )),
+  adminOnlyCommand(new SlashCommandBuilder()
     .setName("post-latest")
     .setDescription("Fetch and post the latest patch notes for an AppID")
     .addIntegerOption((option) =>
@@ -260,6 +290,13 @@ function getIncludeLinks(config) {
   return config?.include_links ?? INCLUDE_SOURCE_LINKS;
 }
 
+function getSourceMode(config) {
+  const value = Number(config?.debug_mode);
+  if (value === 0) return "api";
+  if (value === 2) return "rss";
+  return "auto";
+}
+
 function getTargetChannelId(guildConfig, gameConfig) {
   return gameConfig?.target_channel_id ?? guildConfig?.target_channel_id ?? null;
 }
@@ -273,18 +310,89 @@ function fitDiscordMessage(content) {
   return `${content.slice(0, 1996)}...`;
 }
 
-async function markExistingNewsAsSeen(guildId, appId, filterMode, reason) {
+function getNewsItemSource(item) {
+  return item?.source || "api";
+}
+
+function getNewsItemContent(item) {
+  if (item?.content_format === "rss_html") {
+    return stripRssHtml(item.contents || "");
+  }
+  return stripSteamMarkup(item?.contents || "");
+}
+
+function summarizeLatestItem(items) {
+  const sorted = [...items].sort((a, b) => b.date - a.date);
+  const item = sorted[0];
+  if (!item) return {};
+  return {
+    latestSource: getNewsItemSource(item),
+    latestGid: item.gid,
+    latestDate: item.date,
+    latestDateIso: new Date(item.date * 1000).toISOString(),
+    latestTitle: item.title,
+  };
+}
+
+async function fetchConfiguredNewsForApp(appId, config, context = {}) {
+  const sourceMode = getSourceMode(config);
+  if (sourceMode === "api") {
+    const items = await fetchNewsForApp(appId, STEAM_API_KEY);
+    return { items, source: "api", fallback: false };
+  }
+
+  try {
+    const items = await fetchRssNewsForApp(appId);
+    if (!items.length) {
+      throw new Error(`Steam RSS returned no items for app ${appId}`);
+    }
+    return { items, source: "rss", fallback: false };
+  } catch (err) {
+    if (sourceMode === "rss") throw err;
+    logWarn("Steam RSS fetch failed; falling back to Web API", context, err);
+    const items = await fetchNewsForApp(appId, STEAM_API_KEY);
+    return { items, source: "api", fallback: true };
+  }
+}
+
+function logDebugModeSourceCheck({
+  guildId,
+  appId,
+  result,
+  filtered,
+  lastSeen,
+  newItems,
+}) {
+  logInfo("Debug source check", {
+    guildId,
+    appId,
+    source: result.source,
+    fallback: result.fallback,
+    rawItems: result.items.length,
+    filteredItems: filtered.length,
+    lastSeen,
+    newItems: newItems.length,
+    ...summarizeLatestItem(filtered),
+  });
+}
+
+async function markExistingNewsAsSeen(guildId, appId, config, reason) {
   const fallbackDate = Math.floor(Date.now() / 1000);
   setLastSeen(guildId, appId, fallbackDate);
 
   try {
-    const items = await fetchNewsForApp(appId, STEAM_API_KEY);
-    const filtered = filterNewsItems(items, filterMode);
+    const result = await fetchConfiguredNewsForApp(appId, config, {
+      guildId,
+      appId,
+      reason,
+    });
+    const filtered = filterNewsItems(result.items, getFilterMode(config));
     if (!filtered.length) {
       logInfo("Initialized last_seen to current time with no existing news found", {
         guildId,
         appId,
         reason,
+        source: result.source,
         lastSeenDate: fallbackDate,
       });
       return { initialized: true, lastSeenDate: fallbackDate, noNews: true };
@@ -296,6 +404,7 @@ async function markExistingNewsAsSeen(guildId, appId, filterMode, reason) {
       guildId,
       appId,
       reason,
+      source: result.source,
       lastSeenDate: filtered[0].date,
     });
     return { initialized: true, lastSeenDate: filtered[0].date };
@@ -402,25 +511,38 @@ async function pollOnce() {
         }
 
         stats.appsVisited += 1;
-        let items;
+        let result;
         try {
-          items = await fetchNewsForApp(appId, STEAM_API_KEY);
+          result = await fetchConfiguredNewsForApp(appId, guild, { guildId, appId });
         } catch (err) {
           logWarn("Steam fetch failed", { guildId, appId }, err);
           continue;
         }
 
-        const filtered = filterNewsItems(items, getFilterMode(guild));
-        if (!filtered.length) continue;
-
-        filtered.sort((a, b) => b.date - a.date);
+        const filtered = filterNewsItems(result.items, getFilterMode(guild))
+          .sort((a, b) => b.date - a.date);
         const lastSeen = getLastSeen(guildId, appId);
+
+        if (!filtered.length) {
+          if (getSourceMode(guild) !== "api") {
+            logDebugModeSourceCheck({
+              guildId,
+              appId,
+              result,
+              filtered,
+              lastSeen,
+              newItems: [],
+            });
+          }
+          continue;
+        }
 
         if (!lastSeen) {
           setLastSeen(guildId, appId, filtered[0].date);
           logInfo("Initialized last_seen for app", {
             guildId,
             appId,
+            source: result.source,
             lastSeenDate: filtered[0].date,
           });
           continue;
@@ -430,12 +552,23 @@ async function pollOnce() {
           .filter((item) => item.date > lastSeen)
           .sort((a, b) => a.date - b.date);
 
+        if (getSourceMode(guild) !== "api") {
+          logDebugModeSourceCheck({
+            guildId,
+            appId,
+            result,
+            filtered,
+            lastSeen,
+            newItems,
+          });
+        }
+
         if (!newItems.length) continue;
 
         const appLabel = await resolveAppName(appId);
 
         for (const item of newItems) {
-          const content = stripSteamMarkup(item.contents || "");
+          const content = getNewsItemContent(item);
           const messages = buildMessages({
             title: item.title || `Steam Update ${item.gid}`,
             appLabel,
@@ -464,6 +597,7 @@ async function pollOnce() {
                 channelId: channel.id,
                 itemGid: item.gid,
                 itemDate: item.date,
+                source: getNewsItemSource(item),
               },
               err
             );
@@ -479,6 +613,7 @@ async function pollOnce() {
             channelId: channel.id,
             itemGid: item.gid,
             itemDate: item.date,
+            source: getNewsItemSource(item),
             chunks: messages.length,
           });
         }
@@ -506,6 +641,8 @@ client.on("interactionCreate", async (interaction) => {
     "remove-game",
     "set-filter",
     "set-links",
+    "set-source",
+    "set-debug",
     "post-latest",
   ]);
   if (adminOnlyCommands.has(interaction.commandName)) {
@@ -563,7 +700,7 @@ client.on("interactionCreate", async (interaction) => {
             await markExistingNewsAsSeen(
               guildId,
               appId,
-              getFilterMode(config),
+              config,
               "game-target-configured"
             );
           }
@@ -590,7 +727,7 @@ client.on("interactionCreate", async (interaction) => {
           await markExistingNewsAsSeen(
             guildId,
             game.app_id,
-            getFilterMode(config),
+            config,
             "default-target-configured"
           );
         }
@@ -648,7 +785,7 @@ client.on("interactionCreate", async (interaction) => {
         await markExistingNewsAsSeen(
           guildId,
           appId,
-          getFilterMode(config),
+          config,
           "game-added"
         );
 
@@ -714,6 +851,32 @@ client.on("interactionCreate", async (interaction) => {
         });
         return;
       }
+      case "set-source": {
+        const source = interaction.options.getString("source", true);
+        const sourceValue = { api: 0, auto: 1, rss: 2 }[source];
+        setDebugMode(guildId, sourceValue);
+        await interaction.reply({
+          content: {
+            rss: "Source set to RSS only. RSS errors will be reported without Web-API fallback.",
+            auto: "Source set to Auto: RSS first, with Web-API fallback.",
+            api: "Source set to the Steam Web API.",
+          }[source],
+          ephemeral: true,
+        });
+        return;
+      }
+      case "set-debug": {
+        const enabled = interaction.options.getString("enabled", true);
+        const debug = enabled === "on";
+        setDebugMode(guildId, debug ? 1 : 0);
+        await interaction.reply({
+          content: debug
+            ? "Legacy setting applied: source is RSS with Web API fallback. Use /set-source for future changes."
+            : "Legacy setting applied: source is the Steam Web API. Use /set-source for future changes.",
+          ephemeral: true,
+        });
+        return;
+      }
       case "post-latest": {
         const appId = interaction.options.getInteger("appid", true);
         if (!Number.isInteger(appId) || appId <= 0) {
@@ -758,18 +921,18 @@ client.on("interactionCreate", async (interaction) => {
             return;
           }
 
-          let items;
+          let result;
           try {
-            items = await fetchNewsForApp(appId, STEAM_API_KEY);
+            result = await fetchConfiguredNewsForApp(appId, config, { guildId, appId });
           } catch (err) {
             await interaction.editReply(
-              `Steam API request failed for AppID ${appId}.`
+              `Steam request failed for AppID ${appId}.`
             );
             return;
           }
 
           const filtered = filterNewsItems(
-            items,
+            result.items,
             getFilterMode(config)
           );
           if (!filtered.length) {
@@ -780,7 +943,7 @@ client.on("interactionCreate", async (interaction) => {
           filtered.sort((a, b) => b.date - a.date);
           const item = filtered[0];
           const appLabel = await resolveAppName(appId);
-          const content = stripSteamMarkup(item.contents || "");
+          const content = getNewsItemContent(item);
           const messages = buildMessages({
             title: item.title || `Steam Update ${item.gid}`,
             appLabel,
@@ -808,6 +971,7 @@ client.on("interactionCreate", async (interaction) => {
                 channelId: targetChannel.id,
                 itemGid: item.gid,
                 itemDate: item.date,
+                source: getNewsItemSource(item),
               },
               err
             );
@@ -818,7 +982,9 @@ client.on("interactionCreate", async (interaction) => {
           }
 
           setLastSeen(guildId, appId, item.date);
-          await interaction.editReply(`Posted latest patch notes for AppID ${appId}.`);
+          await interaction.editReply(
+            `Posted latest patch notes for AppID ${appId} using ${getNewsItemSource(item)}.`
+          );
         } finally {
           postLatestGuildInFlight.delete(guildId);
         }
@@ -837,6 +1003,11 @@ client.on("interactionCreate", async (interaction) => {
         const target = formatTarget(config?.target_channel_id);
         const filter = getFilterMode(config);
         const links = getIncludeLinks(config) ? "on" : "off";
+        const source = {
+          rss: "RSS only",
+          auto: "Auto (RSS, Web API fallback)",
+          api: "Steam Web API",
+        }[getSourceMode(config)];
         const gamesText = games.length
           ? games
               .map((game) => {
@@ -848,7 +1019,7 @@ client.on("interactionCreate", async (interaction) => {
               .join("\n")
           : "(none)";
         await interaction.reply({
-          content: fitDiscordMessage(`Default target: ${target}\nFilter: ${filter}\nLinks: ${links}\nGames:\n${gamesText}`),
+          content: fitDiscordMessage(`Default target: ${target}\nFilter: ${filter}\nLinks: ${links}\nSource: ${source}\nGames:\n${gamesText}`),
           ephemeral: true,
         });
         return;

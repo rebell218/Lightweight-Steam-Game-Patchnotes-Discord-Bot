@@ -8,6 +8,7 @@ This bot monitors Steam news for specific AppIDs and posts full patch-note text 
 - Supports Channels and Threads
 - Set a global channel for all Games or designate target-channels per Game individually
 - Optional source link at the end (embeds suppressed)
+- Uses Steam RSS by default, with Web API fallback; source can be selected per server
 
 ## Commands
 - `/set-target channel:#channel-or-thread`
@@ -18,6 +19,8 @@ This bot monitors Steam news for specific AppIDs and posts full patch-note text 
 - `/list-games`
 - `/set-filter mode:patch_only|all`
 - `/set-links enabled:on|off`
+- `/set-source source:rss|auto|api`
+- `/set-debug enabled:on|off` (legacy alias)
 - `/post-latest appid:123456`
 - `/status`
 
@@ -67,9 +70,16 @@ Set verbosity with `LOG_LEVEL` in `.env`:
 - `warn`: warnings and errors only
 - `error`: errors only
 
+When RSS or Auto is selected with `/set-source`:
+- Polling uses the Steam RSS feed first.
+- In `auto` mode, if RSS fails or returns no items, polling falls back to the Steam Web API.
+- Each monitored app logs source diagnostics such as source, fallback status, raw item count, filtered item count, latest item timestamp, `last_seen`, and pending new item count.
+
+In `rss` mode, RSS errors are reported without a Web API fallback. When `/set-source source:api` is selected, the server uses the Steam Web API-only polling path.
+
 
 ## Access Control and Abuse Protection
-- Configuration commands are admin-only: `/set-target`, `/add-game`, `/remove-game`, `/set-filter`, `/set-links`, and `/post-latest`.
+- Configuration commands are admin-only: `/set-target`, `/add-game`, `/remove-game`, `/set-filter`, `/set-links`, `/set-source`, `/set-debug`, and `/post-latest`.
 - Admin-only access is enforced in two layers:
   - Discord command defaults (`Administrator` required to run those commands)
   - Runtime permission check in bot code (`interaction.memberPermissions`)
@@ -83,6 +93,7 @@ Set verbosity with `LOG_LEVEL` in `.env`:
 - AppID-specific targets override the default server target. Games without their own target use the default target.
 - Steam news content can include BBCode/HTML. The bot strips most formatting for clean text.
 - In `patch_only` mode, the bot only uses official Steam community announcement feed posts (external media reposts are ignored).
+- RSS mode normalizes Steam RSS HTML into the same plain Discord-friendly format used for Web API posts.
 
 ## Data Storage
 - SQLite database: `data/bot.sqlite`

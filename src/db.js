@@ -17,7 +17,8 @@ db.exec(`
     guild_id TEXT PRIMARY KEY,
     target_channel_id TEXT,
     filter_mode TEXT NOT NULL DEFAULT 'patch_only',
-    include_links INTEGER NOT NULL DEFAULT 1
+    include_links INTEGER NOT NULL DEFAULT 1,
+    debug_mode INTEGER NOT NULL DEFAULT 1
   );
 
   CREATE TABLE IF NOT EXISTS game_config (
@@ -76,6 +77,16 @@ if (!gameColumns.includes("target_channel_id")) {
   db.exec("ALTER TABLE game_config ADD COLUMN target_channel_id TEXT");
 }
 
+const guildColumns = getTableColumns("guild_config").map((column) => column.name);
+if (!guildColumns.includes("debug_mode")) {
+  db.exec("ALTER TABLE guild_config ADD COLUMN debug_mode INTEGER NOT NULL DEFAULT 1");
+}
+
+// Source-mode values: 0 = API, 1 = auto (RSS with API fallback), 2 = RSS.
+// Migrate the former default (debug_mode = 0) to the new default. The
+// legacy /set-debug off command remains available for an explicit API choice.
+db.exec("UPDATE guild_config SET debug_mode = 1 WHERE debug_mode = 0");
+
 const stmtSetTarget = db.prepare(
   `INSERT INTO guild_config (guild_id, target_channel_id, filter_mode, include_links)
    VALUES (@guild_id, @target_channel_id, COALESCE(@filter_mode, 'patch_only'), COALESCE(@include_links, 1))
@@ -83,14 +94,15 @@ const stmtSetTarget = db.prepare(
 );
 
 const stmtGetGuild = db.prepare(
-  `SELECT guild_id, target_channel_id, filter_mode, include_links FROM guild_config WHERE guild_id = ?`
+  `SELECT guild_id, target_channel_id, filter_mode, include_links, debug_mode FROM guild_config WHERE guild_id = ?`
 );
 
 const stmtListGuilds = db.prepare(
   `SELECT guild_ids.guild_id,
           guild_config.target_channel_id,
           guild_config.filter_mode,
-          guild_config.include_links
+          guild_config.include_links,
+          guild_config.debug_mode
    FROM (
      SELECT guild_id FROM guild_config
      UNION
@@ -110,6 +122,12 @@ const stmtSetIncludeLinks = db.prepare(
   `INSERT INTO guild_config (guild_id, include_links)
    VALUES (?, ?)
    ON CONFLICT(guild_id) DO UPDATE SET include_links = excluded.include_links`
+);
+
+const stmtSetDebugMode = db.prepare(
+  `INSERT INTO guild_config (guild_id, debug_mode)
+   VALUES (?, ?)
+   ON CONFLICT(guild_id) DO UPDATE SET debug_mode = excluded.debug_mode`
 );
 
 const stmtAddGame = db.prepare(
@@ -180,6 +198,10 @@ export function setFilterMode(guildId, filterMode) {
 
 export function setIncludeLinks(guildId, includeLinks) {
   stmtSetIncludeLinks.run(guildId, includeLinks ? 1 : 0);
+}
+
+export function setDebugMode(guildId, debugMode) {
+  stmtSetDebugMode.run(guildId, debugMode ? 1 : 0);
 }
 
 export function addGame(guildId, appId, targetChannelId = null) {
