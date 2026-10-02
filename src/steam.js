@@ -87,6 +87,13 @@ markdownConverter.addRule("steamHeading", {
   },
 });
 
+markdownConverter.addRule("steamHorizontalRule", {
+  filter: "hr",
+  replacement() {
+    return `\n\n${"-".repeat(48)}\n\n`;
+  },
+});
+
 markdownConverter.addRule("steamTable", {
   filter: "table",
   replacement(_content, node) {
